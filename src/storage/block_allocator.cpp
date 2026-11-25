@@ -1329,10 +1329,8 @@ void BlockAllocator::FlushForAllocation(const idx_t extra_memory, const idx_t me
 }
 
 bool BlockAllocator::TryFlushDeallocated(const idx_t threshold, const idx_t memory_headroom) const noexcept {
-	if (TrimCachedMemory(memory_headroom) > 0) {
-		FlushFallbackAllocator(estimated_unflushed_memory.exchange(0, std::memory_order_relaxed));
-		return true;
-	}
+	// Trimmed allocations join the other fallback frees, and are purged with them.
+	TrimCachedMemory(memory_headroom);
 	auto deallocated = estimated_unflushed_memory.load(std::memory_order_relaxed);
 	if (deallocated == 0 || deallocated < threshold || !Allocator::SupportsFlush()) {
 		return false;
