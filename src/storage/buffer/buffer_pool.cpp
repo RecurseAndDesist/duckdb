@@ -405,13 +405,14 @@ BufferPool::EvictionResult BufferPool::EvictObjectCacheEntries(MemoryTag tag, id
 	return {true, std::move(r)};
 }
 
-void BufferPool::FlushForAllocation(const idx_t extra_memory, const idx_t memory_limit) {
+void BufferPool::FlushForAllocation(const idx_t extra_memory, const idx_t memory_limit,
+                                    unique_ptr<FileBuffer> *buffer) {
 	static constexpr idx_t BULK_DEALLOCATION_FLUSH_DIVISOR = 16;
 	auto memory_headroom = memory_limit - MinValue(memory_limit, GetUsedMemory(false));
 	const auto cached_allocations = block_allocator.GetCachedAllocationMemory();
 	if (cached_allocations > memory_headroom) {
 		// Blocks that can be read again give way before allocations that are about to be reused.
-		EvictReloadableBlocks(memory_limit - MinValue(memory_limit, cached_allocations));
+		EvictReloadableBlocks(extra_memory, memory_limit - MinValue(memory_limit, cached_allocations), buffer);
 		memory_headroom = memory_limit - MinValue(memory_limit, GetUsedMemory(false));
 	}
 	if (extra_memory > allocator_bulk_deallocation_flush_threshold) {
@@ -421,7 +422,8 @@ void BufferPool::FlushForAllocation(const idx_t extra_memory, const idx_t memory
 	}
 }
 
-void BufferPool::EvictReloadableBlocks(const idx_t memory_limit) {
+void BufferPool::EvictReloadableBlocks(const idx_t extra_memory, const idx_t memory_limit,
+                                       unique_ptr<FileBuffer> *buffer) {
 	for (idx_t queue_idx = 0; queue_idx < BLOCK_AND_EXTERNAL_FILE_QUEUE_SIZE; queue_idx++) {
 		auto &queue = *queues[queue_idx];
 		if (queue.GetApproximateSize() == 0) {
@@ -435,7 +437,12 @@ void BufferPool::EvictReloadableBlocks(const idx_t memory_limit) {
 				    queue.Enqueue(lock, *handle, std::move(node));
 				    return false;
 			    }
-			    handle->Unload(lock);
+			    if (buffer && !*buffer && handle->GetBuffer(lock)->AllocSize() == extra_memory) {
+				    // we can re-use the memory directly
+				    *buffer = handle->UnloadAndTakeBlock(lock);
+			    } else {
+				    handle->Unload(lock);
+			    }
 			    return memory_usage.GetUsedMemory(MemoryUsageCaches::NO_FLUSH) > memory_limit;
 		    });
 	}
@@ -462,7 +469,7 @@ BufferPool::EvictionResult BufferPool::EvictBlocksInternal(QueryContext context,
 	bool found = false;
 
 	if (memory_usage.GetUsedMemory(MemoryUsageCaches::NO_FLUSH) <= memory_limit) {
-		FlushForAllocation(extra_memory, memory_limit);
+		FlushForAllocation(extra_memory, memory_limit, buffer);
 		return {true, std::move(r)};
 	}
 
@@ -490,7 +497,7 @@ BufferPool::EvictionResult BufferPool::EvictBlocksInternal(QueryContext context,
 	if (!found) {
 		r.Resize(0);
 	} else {
-		FlushForAllocation(extra_memory, memory_limit);
+		FlushForAllocation(extra_memory, memory_limit, buffer);
 	}
 
 	return {found, std::move(r)};
