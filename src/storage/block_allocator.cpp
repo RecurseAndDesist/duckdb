@@ -982,6 +982,10 @@ idx_t BlockAllocator::GetCachedMemory() const {
 	return GetCachedPoolMemory() + allocation_cache->GetCachedMemory();
 }
 
+idx_t BlockAllocator::GetCachedAllocationMemory() const {
+	return allocation_cache->GetCachedMemory();
+}
+
 idx_t BlockAllocator::GetCachedPoolMemory() const {
 	int64_t count = 0;
 	const auto slots =
@@ -1299,12 +1303,15 @@ idx_t BlockAllocator::TrimCachedMemory(idx_t memory_headroom, optional_idx pool_
 	idx_t pool_headroom;
 	{
 		annotated_lock_guard<annotated_mutex> guard(flush_lock);
-		const auto total = GetCachedMemory();
-		if (total <= memory_headroom) {
+		if (GetCachedMemory() <= memory_headroom) {
 			return 0;
 		}
-		freed = allocation_cache->Flush(total - memory_headroom);
-		estimated_unflushed_memory.fetch_add(freed, std::memory_order_relaxed);
+		// Pool blocks are returned on their own, cached allocations only by purging the fallback allocator.
+		const auto cached_allocations = allocation_cache->GetCachedMemory();
+		if (cached_allocations > memory_headroom) {
+			freed = allocation_cache->Flush(cached_allocations - memory_headroom);
+			estimated_unflushed_memory.fetch_add(freed, std::memory_order_relaxed);
+		}
 		const auto remaining = allocation_cache->GetCachedMemory();
 		pool_headroom = memory_headroom - MinValue(memory_headroom, remaining);
 	}

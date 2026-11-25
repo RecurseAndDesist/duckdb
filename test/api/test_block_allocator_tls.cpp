@@ -844,6 +844,27 @@ TEST_CASE("Allocation cache pressure accounts for fixed backing and preserves li
 	CHECK(live_bytes.load() == 0);
 }
 
+TEST_CASE("Free pool blocks give up the headroom before cached allocations", "[api][allocation_cache]") {
+	constexpr idx_t BLOCK_SIZE = 256 * 1024;
+	constexpr idx_t SIZE = 2 * BLOCK_SIZE;
+	Allocator fallback;
+	BlockAllocator allocator(fallback, BLOCK_SIZE, 4 * BLOCK_SIZE);
+	auto pooled = allocator.AllocateData(BLOCK_SIZE);
+	auto cached = allocator.AllocateData(SIZE);
+	allocator.FreeData(pooled, BLOCK_SIZE);
+	allocator.FreeData(cached, SIZE);
+	REQUIRE(allocator.GetCachedMemory() == BLOCK_SIZE + SIZE);
+	REQUIRE(allocator.GetCachedAllocationMemory() == SIZE);
+
+	// Returning the pool block needs no purge of the fallback allocator.
+	CHECK_FALSE(allocator.TryFlushDeallocated(NumericLimits<idx_t>::Maximum(), SIZE));
+	CHECK(allocator.GetCachedMemory() == SIZE);
+	CHECK(allocator.GetCachedAllocationMemory() == SIZE);
+	// The cached allocation goes once it does not fit by itself.
+	CHECK(allocator.TryFlushDeallocated(NumericLimits<idx_t>::Maximum(), SIZE - 1));
+	CHECK(allocator.GetCachedMemory() == 0);
+}
+
 TEST_CASE("BufferPool reclaims retained backing on small reservations and memory limit changes",
           "[api][block_allocator][allocation_cache]") {
 	class TestBufferPool : public BufferPool {

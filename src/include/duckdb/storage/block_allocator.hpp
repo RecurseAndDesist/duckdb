@@ -81,6 +81,8 @@ public:
 
 	//! Free backing retained in global queues, thread-local caches, and ongoing reclamation.
 	idx_t GetCachedMemory() const;
+	//! The cached memory outside the pool, which is only returned by purging the fallback allocator.
+	idx_t GetCachedAllocationMemory() const;
 
 	//! Approximate locality of fixed-pool backing, unknown for other allocations
 	optional_idx GetAllocationShard(const_data_ptr_t pointer) const;
