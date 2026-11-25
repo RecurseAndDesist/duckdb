@@ -409,10 +409,12 @@ void BufferPool::FlushForAllocation(const idx_t extra_memory, const idx_t memory
                                     unique_ptr<FileBuffer> *buffer) {
 	static constexpr idx_t BULK_DEALLOCATION_FLUSH_DIVISOR = 16;
 	auto memory_headroom = memory_limit - MinValue(memory_limit, GetUsedMemory(false));
-	const auto cached_allocations = block_allocator.GetCachedAllocationMemory();
+	// Blocks that can be read again give way before allocations that are about to be reused, up to the share of
+	// the limit that freed memory is allowed to take.
+	const auto cached_allocations =
+	    MinValue(block_allocator.GetCachedAllocationMemory(), memory_limit / BULK_DEALLOCATION_FLUSH_DIVISOR);
 	if (cached_allocations > memory_headroom) {
-		// Blocks that can be read again give way before allocations that are about to be reused.
-		EvictReloadableBlocks(extra_memory, memory_limit - MinValue(memory_limit, cached_allocations), buffer);
+		EvictReloadableBlocks(extra_memory, memory_limit - cached_allocations, buffer);
 		memory_headroom = memory_limit - MinValue(memory_limit, GetUsedMemory(false));
 	}
 	if (extra_memory > allocator_bulk_deallocation_flush_threshold) {

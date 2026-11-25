@@ -615,17 +615,22 @@ TEST_CASE("Blocks that can be read again are evicted before cached allocations a
 	auto &pool = manager.GetBufferPool();
 	auto &allocator = BlockAllocator::Get(*db.instance);
 	const idx_t block_size = 64 * 1024;
-	// Allocated as a power of two, which the allocator keeps for reuse.
-	const idx_t cached_size = 1024 * 1024 - Storage::DEFAULT_BLOCK_HEADER_SIZE;
-	const bool reloadable = GENERATE(true, false);
-	if (!reloadable) {
+	const idx_t block_count = 512;
+	// Allocated as powers of two, which the allocator keeps for reuse: 1 MiB is less than a sixteenth of the
+	// limit below, 4 MiB is more.
+	const idx_t small_cached_size = 1024 * 1024 - Storage::DEFAULT_BLOCK_HEADER_SIZE;
+	const idx_t large_cached_size = 4 * 1024 * 1024 - Storage::DEFAULT_BLOCK_HEADER_SIZE;
+	enum class Scenario { RELOADABLE, WRITTEN, OVER_SHARE };
+	const auto scenario = GENERATE(Scenario::RELOADABLE, Scenario::WRITTEN, Scenario::OVER_SHARE);
+	const auto cached_size = scenario == Scenario::OVER_SHARE ? large_cached_size : small_cached_size;
+	if (scenario == Scenario::WRITTEN) {
 		manager.SetTemporaryDirectory(TestCreatePath("cached_allocation_spill"));
 	}
 	vector<shared_ptr<BlockHandle>> blocks;
-	for (idx_t i = 0; i < 32; i++) {
+	for (idx_t i = 0; i < block_count; i++) {
 		// External file buffers are dropped on eviction, the other buffers are written to a temporary file.
-		auto pin = reloadable ? manager.Allocate(MemoryTag::EXTERNAL_FILE_CACHE, block_size)
-		                      : manager.Allocate(MemoryTag::HASH_TABLE, block_size, false);
+		auto pin = scenario == Scenario::WRITTEN ? manager.Allocate(MemoryTag::HASH_TABLE, block_size, false)
+		                                         : manager.Allocate(MemoryTag::EXTERNAL_FILE_CACHE, block_size);
 		blocks.push_back(pin.GetBlockHandle());
 	}
 	auto unloaded_blocks = [&]() {
@@ -637,6 +642,8 @@ TEST_CASE("Blocks that can be read again are evicted before cached allocations a
 	};
 	pool.SetLimit(pool.GetUsedMemory(), EXCEPTION_POSTSCRIPT);
 	REQUIRE(unloaded_blocks() == 0);
+	REQUIRE(small_cached_size < pool.GetMaxMemory() / 16);
+	REQUIRE(large_cached_size > pool.GetMaxMemory() / 16);
 
 	// The limit is taken up by unpinned blocks: this allocation evicts some of them, and stays cached once freed.
 	manager.Allocate(MemoryTag::HASH_TABLE, cached_size).Destroy();
@@ -648,11 +655,11 @@ TEST_CASE("Blocks that can be read again are evicted before cached allocations a
 
 	// The next reservation takes room the cached allocation needs.
 	auto pin = manager.Allocate(MemoryTag::HASH_TABLE, block_size);
-	if (reloadable) {
+	if (scenario == Scenario::RELOADABLE) {
 		CHECK(allocator.GetCachedAllocationMemory() == cached_memory);
 		CHECK(unloaded_blocks() > unloaded);
 	} else {
-		// Writing blocks to keep allocator memory is not worth it.
+		// Writing blocks is not worth it to keep allocator memory, and neither is more than a share of the limit.
 		CHECK(allocator.GetCachedAllocationMemory() == 0);
 		CHECK(unloaded_blocks() == unloaded);
 	}
