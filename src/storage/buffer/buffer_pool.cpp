@@ -407,12 +407,37 @@ BufferPool::EvictionResult BufferPool::EvictObjectCacheEntries(MemoryTag tag, id
 
 void BufferPool::FlushForAllocation(const idx_t extra_memory, const idx_t memory_limit) {
 	static constexpr idx_t BULK_DEALLOCATION_FLUSH_DIVISOR = 16;
-	const auto used_memory = GetUsedMemory(false);
-	const auto memory_headroom = memory_limit - MinValue(memory_limit, used_memory);
+	auto memory_headroom = memory_limit - MinValue(memory_limit, GetUsedMemory(false));
+	const auto cached_allocations = block_allocator.GetCachedAllocationMemory();
+	if (cached_allocations > memory_headroom) {
+		// Blocks that can be read again give way before allocations that are about to be reused.
+		EvictReloadableBlocks(memory_limit - MinValue(memory_limit, cached_allocations));
+		memory_headroom = memory_limit - MinValue(memory_limit, GetUsedMemory(false));
+	}
 	if (extra_memory > allocator_bulk_deallocation_flush_threshold) {
 		block_allocator.FlushForAllocation(extra_memory, memory_headroom);
 	} else {
 		block_allocator.TryFlushDeallocated(memory_limit / BULK_DEALLOCATION_FLUSH_DIVISOR, memory_headroom);
+	}
+}
+
+void BufferPool::EvictReloadableBlocks(const idx_t memory_limit) {
+	for (idx_t queue_idx = 0; queue_idx < BLOCK_AND_EXTERNAL_FILE_QUEUE_SIZE; queue_idx++) {
+		auto &queue = *queues[queue_idx];
+		if (queue.GetApproximateSize() == 0) {
+			continue;
+		}
+		queue.IterateUnloadableBlocks(
+		    [&](BufferEvictionNode &node, const shared_ptr<BlockMemory> &handle, BlockLock &lock) {
+			    const bool writes_block = handle->BlockId() >= MAXIMUM_BLOCK && handle->MustWriteToTemporaryFile();
+			    if (writes_block || memory_usage.GetUsedMemory(MemoryUsageCaches::NO_FLUSH) <= memory_limit) {
+				    // Another thread made the room, or unloading this block costs a write.
+				    queue.Enqueue(lock, *handle, std::move(node));
+				    return false;
+			    }
+			    handle->Unload(lock);
+			    return memory_usage.GetUsedMemory(MemoryUsageCaches::NO_FLUSH) > memory_limit;
+		    });
 	}
 }
 

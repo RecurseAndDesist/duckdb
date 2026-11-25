@@ -99,6 +99,8 @@ protected:
 	EvictionResult EvictObjectCacheEntries(MemoryTag tag, idx_t extra_memory, idx_t memory_limit);
 	//! Flush bulk allocations and accumulated fallback frees using the remaining headroom.
 	void FlushForAllocation(idx_t extra_memory, idx_t memory_limit);
+	//! Evict blocks that are unloaded without a write, until the used memory fits the limit or none are left
+	void EvictReloadableBlocks(idx_t memory_limit);
 
 	//! Purge all blocks that haven't been pinned within the last N seconds
 	idx_t PurgeAgedBlocks(uint32_t max_age_sec);

@@ -5,6 +5,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/storage/block_allocator.hpp"
 #include "duckdb/storage/object_cache.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/buffer/buffer_pool.hpp"
@@ -604,6 +605,56 @@ TEST_CASE("Temporary buffer cleanup after spill and destruction policy changes",
 				}
 			}
 		}
+	}
+}
+
+TEST_CASE("Blocks that can be read again are evicted before cached allocations are returned",
+          "[storage][buffer_pool]") {
+	DuckDB db;
+	auto &manager = BufferManager::GetBufferManager(*db.instance);
+	auto &pool = manager.GetBufferPool();
+	auto &allocator = BlockAllocator::Get(*db.instance);
+	const idx_t block_size = 64 * 1024;
+	// Allocated as a power of two, which the allocator keeps for reuse.
+	const idx_t cached_size = 1024 * 1024 - Storage::DEFAULT_BLOCK_HEADER_SIZE;
+	const bool reloadable = GENERATE(true, false);
+	if (!reloadable) {
+		manager.SetTemporaryDirectory(TestCreatePath("cached_allocation_spill"));
+	}
+	vector<shared_ptr<BlockHandle>> blocks;
+	for (idx_t i = 0; i < 32; i++) {
+		// External file buffers are dropped on eviction, the other buffers are written to a temporary file.
+		auto pin = reloadable ? manager.Allocate(MemoryTag::EXTERNAL_FILE_CACHE, block_size)
+		                      : manager.Allocate(MemoryTag::HASH_TABLE, block_size, false);
+		blocks.push_back(pin.GetBlockHandle());
+	}
+	auto unloaded_blocks = [&]() {
+		idx_t count = 0;
+		for (auto &block : blocks) {
+			count += block->GetMemory().GetState() == BlockState::BLOCK_UNLOADED;
+		}
+		return count;
+	};
+	pool.SetLimit(pool.GetUsedMemory(), EXCEPTION_POSTSCRIPT);
+	REQUIRE(unloaded_blocks() == 0);
+
+	// The limit is taken up by unpinned blocks: this allocation evicts some of them, and stays cached once freed.
+	manager.Allocate(MemoryTag::HASH_TABLE, cached_size).Destroy();
+	const auto cached_memory = allocator.GetCachedAllocationMemory();
+	REQUIRE(cached_memory >= cached_size);
+	const auto unloaded = unloaded_blocks();
+	REQUIRE(unloaded > 0);
+	REQUIRE(unloaded < blocks.size());
+
+	// The next reservation takes room the cached allocation needs.
+	auto pin = manager.Allocate(MemoryTag::HASH_TABLE, block_size);
+	if (reloadable) {
+		CHECK(allocator.GetCachedAllocationMemory() == cached_memory);
+		CHECK(unloaded_blocks() > unloaded);
+	} else {
+		// Writing blocks to keep allocator memory is not worth it.
+		CHECK(allocator.GetCachedAllocationMemory() == 0);
+		CHECK(unloaded_blocks() == unloaded);
 	}
 }
 
