@@ -102,9 +102,12 @@ optional_ptr<const Expression> WindowRangeBoundary::Match(const Expression &expr
 	if (!matches_signature || !matches_types) {
 		return nullptr;
 	}
-	auto input_order = WindowRangeCast::Match(*call.GetChildren()[0], order_casts);
-	if (!input_order || !Expression::Equals(*input_order, order)) {
-		return nullptr;
+	auto &call_order = *call.GetChildren()[0];
+	if (!Expression::Equals(call_order, order)) {
+		auto input_order = WindowRangeCast::Match(call_order, order_casts);
+		if (!input_order || !Expression::Equals(*input_order, order)) {
+			return nullptr;
+		}
 	}
 	return call.GetChildren()[1].get();
 }
