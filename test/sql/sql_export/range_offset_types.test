@@ -4,7 +4,7 @@
 
 require skip_reload
 
-# keys with duplicates and a NULL, in every numeric type; d is an offset column in the type of the key
+# keys with duplicates and a NULL, in every numeric type. d is an offset column in the type of the key
 
 foreach type TINYINT SMALLINT INTEGER BIGINT HUGEINT UTINYINT USMALLINT UINTEGER UBIGINT UHUGEINT DECIMAL(4,1) DECIMAL(9,2) DECIMAL(18,3) DECIMAL(38,2) FLOAT DOUBLE
 
