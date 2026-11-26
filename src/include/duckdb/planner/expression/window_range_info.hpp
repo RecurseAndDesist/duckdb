@@ -52,6 +52,8 @@ struct WindowRangeBoundary {
 
 	static unique_ptr<WindowRangeBoundary> Capture(const Expression &expression, const Expression &order,
 	                                               const Expression &offset);
+	//! The live offset operand of an endpoint that is still the recorded call over the ordering operand. The
+	//! ordering operand is the SQL operand, or the ordering key in the type the call takes it in
 	optional_ptr<const Expression> Match(const Expression &expression, const Expression &order) const;
 };
 } // namespace duckdb

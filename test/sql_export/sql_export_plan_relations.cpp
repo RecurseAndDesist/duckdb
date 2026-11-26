@@ -270,9 +270,11 @@ TEST_CASE("Window SQL export rejects unrelated RANGE endpoints",
 	DuckDB db(nullptr);
 	Connection connection(db);
 	connection.BeginTransaction();
+	// the offset is a column: the endpoint arithmetic holds its only copy, which is what the match protects. A
+	// constant offset is recorded by the binder and does not depend on the endpoint
 	auto plan = OptimizeLogicalPlanExportQuery(
-	    connection, "SELECT sum(x) OVER (ORDER BY x RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) "
-	                "FROM (VALUES (1),(2),(4)) t(x)");
+	    connection, "SELECT sum(x) OVER (ORDER BY x RANGE BETWEEN d PRECEDING AND CURRENT ROW) "
+	                "FROM (VALUES (1,1),(2,1),(4,1)) t(x,d)");
 	auto op = FindLogicalPlanExportOperator(*plan, LogicalOperatorType::LOGICAL_WINDOW);
 	REQUIRE(op);
 	auto &window = op->expressions[0]->Cast<BoundWindowExpression>();

@@ -21,8 +21,8 @@ static bool IsRangeOffset(WindowBoundary boundary) {
 	return boundary == WindowBoundary::EXPR_PRECEDING_RANGE || boundary == WindowBoundary::EXPR_FOLLOWING_RANGE;
 }
 
-//! The SQL offset of a RANGE frame endpoint: the live input the binder's endpoint arithmetic was derived from, or the
-//! recorded zero offset when the optimizer removed that arithmetic
+//! The SQL offset of a RANGE frame endpoint: the live input of the binder's endpoint arithmetic while the endpoint is
+//! still that call, otherwise the constant offset the binder recorded
 static optional_ptr<const Expression> RangeOffset(const BoundWindowExpression &expression, const WindowSQLFrame &frame,
                                                   const unique_ptr<Expression> &endpoint, WindowBoundary boundary,
                                                   const unique_ptr<WindowRangeBoundary> &origin,
@@ -38,17 +38,15 @@ static optional_ptr<const Expression> RangeOffset(const BoundWindowExpression &e
 	if (!origin_matches_endpoint) {
 		return nullptr;
 	}
-	auto &recorded = origin->offset;
-	const bool is_zero_offset =
-	    !recorded.IsNull() && recorded.type().IsNumeric() && recorded == Value::Numeric(recorded.type(), 0);
-	if (is_zero_offset && Expression::Equals(*endpoint, *order.expression)) {
-		// the recorded constant has the type the arithmetic took it in, so that the exported frame binds the same call
-		constant = make_uniq<BoundConstantExpression>(recorded);
-		return constant.get();
-	}
 	auto input = origin->Match(*endpoint, *frame.order);
 	if (!input) {
-		return nullptr;
+		if (origin->offset.IsNull()) {
+			return nullptr;
+		}
+		// the optimizer folded or merged the endpoint arithmetic, which leaves no offset to read. The frame is still
+		// the one the ordering operand and the recorded constant define
+		constant = make_uniq<BoundConstantExpression>(origin->offset);
+		return constant.get();
 	}
 	auto &offset = *input;
 	const bool offset_is_constant = offset.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT;
@@ -56,6 +54,31 @@ static optional_ptr<const Expression> RangeOffset(const BoundWindowExpression &e
 		return nullptr;
 	}
 	return &offset;
+}
+
+//! The SQL ordering operand of a RANGE frame
+static optional_ptr<const Expression> RangeOrder(const BoundWindowExpression &expression) {
+	if (expression.OrderBy().size() != 1) {
+		return nullptr;
+	}
+	auto &order = *expression.OrderBy()[0].expression;
+	auto operand = WindowRangeCast::Match(order, expression.SQLRangeOrderCasts());
+	if (operand && (!expression.SQLRangeOrderType().IsComplete() ||
+	                operand->GetReturnType().EqualsIncludingCollation(expression.SQLRangeOrderType()))) {
+		return operand;
+	}
+	// the optimizer rewrote the ordering key and its casts with it. The key itself binds the same frame when every
+	// endpoint call takes the ordering operand in the type of the key: the binder then selects the recorded call
+	// again and has no cast to add
+	auto takes_key_type = [&](WindowBoundary boundary, const unique_ptr<WindowRangeBoundary> &origin) {
+		return !IsRangeOffset(boundary) ||
+		       (origin && origin->order_type.EqualsIncludingCollation(order.GetReturnType()));
+	};
+	if (takes_key_type(expression.WindowStart(), expression.SQLRangeStartBoundary()) &&
+	    takes_key_type(expression.WindowEnd(), expression.SQLRangeEndBoundary())) {
+		return &order;
+	}
+	return nullptr;
 }
 
 static bool IsOrderDependentBoundary(WindowBoundary boundary) {
@@ -73,13 +96,7 @@ static bool IsOrderDependentBoundary(WindowBoundary boundary) {
 
 static WindowSQLFrame ReconstructWindowFrame(const BoundWindowExpression &expression) {
 	WindowSQLFrame frame;
-	if (expression.OrderBy().size() == 1) {
-		frame.order = WindowRangeCast::Match(*expression.OrderBy()[0].expression, expression.SQLRangeOrderCasts());
-		if (frame.order && expression.SQLRangeOrderType().IsComplete() &&
-		    !frame.order->GetReturnType().EqualsIncludingCollation(expression.SQLRangeOrderType())) {
-			frame.order = nullptr;
-		}
-	}
+	frame.order = RangeOrder(expression);
 	frame.start = RangeOffset(expression, frame, expression.StartExpr(), expression.WindowStart(),
 	                          expression.SQLRangeStartBoundary(), frame.start_constant);
 	frame.end = RangeOffset(expression, frame, expression.EndExpr(), expression.WindowEnd(),
